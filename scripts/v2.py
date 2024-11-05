@@ -5,15 +5,17 @@ from torch.nn import functional as F
 torch.manual_seed(1337)
 
 # hyper-parameters
-context_len = 8
-batch_size = 32
-lr=1e-3
+context_len = 256
+batch_size = 64
+lr=3e-4
+dropout = 0.2
 max_iters = 5000
-eval_interval = 300
+eval_interval = 500
 eval_iters = 200
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
-n_embd = 32
-n_head = 4
+n_embd = 384
+n_head = 6
+n_layer = 6
 # -----------
 
 # Start with the tiny shakespeare dataset to train on
@@ -70,6 +72,8 @@ class Head(nn.Module):
         self.value = nn.Linear(n_embd, head_size, bias=False)
         self.register_buffer('tril', torch.tril(torch.ones(context_len, context_len)))
 
+        self.dropout = nn.Dropout(dropout)
+
     def forward(self, x):
         B, T, C = x.shape
         k = self.key(x) # (B, T, C)
@@ -79,6 +83,7 @@ class Head(nn.Module):
         # slicing is necessary because otherwise the dimension of tril matrix is possibly mismatched with the input in inference.
         wei = wei.masked_fill(self.tril[:T, :T] == 0, value=float("-inf")) # (B, T, T)
         wei = F.softmax(wei, dim=-1) # (B, T, T)
+        wei = self.dropout(wei)
         # perform the weighted aggregation of the values
         v = self.value(x) # (B, T, C)
         out = wei @ v # (B, T, T) @ (B, T, C) ------> (B, T, C)
@@ -93,10 +98,11 @@ class MultiHeadAttention(nn.Module):
         super().__init__()
         self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
         self.proj = nn.Linear(n_embd, n_embd)
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
         x = torch.cat([h(x) for h in self.heads], dim=-1)
-        x = self.proj(x)
+        x = self.dropout(self.proj(x))
         return x
 
 
@@ -109,6 +115,7 @@ class FeedForward(nn.Module):
             nn.Linear(n_embd, 4 * n_embd),
             nn.ReLU(),
             nn.Linear(4 * n_embd, n_embd),
+            nn.Dropout(dropout),
         )
 
     def forward(self, x):
@@ -143,12 +150,8 @@ class BigramLanguageModel(nn.Module):
         # self.sa_head = Head(n_embd)
         # self.sa_head = MultiHeadAttention(4, n_embd//4) # i.e., 4 heads of self-attention
         # self.ffwd = FeedForward(n_embd)
-        self.blocks = nn.Sequential(
-            Block(n_embd, n_head),
-            Block(n_embd, n_head),
-            Block(n_embd, n_head),
-            nn.LayerNorm(n_embd),
-        )
+        self.blocks = nn.Sequential(*[Block(n_embd, n_head) for _ in range(n_layer)])
+        self.ln_f = nn.LayerNorm(n_embd)
         self.lm_head = nn.Linear(n_embd, vocab_size)
 
     def forward(self, idx, targets=None):
@@ -162,6 +165,7 @@ class BigramLanguageModel(nn.Module):
         # x = self.sa_head(x) # apply one head of self-attention, (B,T,C)
         # x = self.ffwd(x) # (B,T,C)
         x = self.blocks(x)
+        x = self.ln_f(x)
         logits = self.lm_head(x) # (B,T,vocab_size)
 
         if targets is None:
