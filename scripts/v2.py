@@ -59,14 +59,40 @@ def evaluate_loss():
     m.train()
     return out
 
+class Head(nn.Module):
+    """One head of self-attention"""
+
+    def __init__(self, head_size):
+        super().__init__()
+        self.key = nn.Linear(n_embd, head_size, bias=False)
+        self.query = nn.Linear(n_embd, head_size, bias=False)
+        self.value = nn.Linear(n_embd, head_size, bias=False)
+        self.register_buffer('tril', torch.tril(torch.ones(context_len, context_len)))
+
+    def forward(self, x):
+        B, T, C = x.shape
+        k = self.key(x) # (B, T, C)
+        q = self.query(x) # (B, T, C)
+        # compute attention scores, so called "affinities".
+        wei = q @ k.transpose(-2, -1) * C**-0.5 # (B, T, C) @ (B, C, T) -------> (B, T, T)
+        # slicing is necessary because otherwise the dimension of tril matrix is possibly mismatched with the input in inference.
+        wei = wei.masked_fill(self.tril[:T, :T] == 0, value=float("-inf")) # (B, T, T)
+        wei = F.softmax(wei, dim=-1) # (B, T, T)
+        # perform the weighted aggregation of the values
+        v = self.value(x) # (B, T, C)
+        out = wei @ v # (B, T, T) @ (B, T, C) ------> (B, T, C)
+
+        return out
+
 # implement the simplist language model: Bigram Language model
 class BigramLanguageModel(nn.Module):
 
-    def __init__(self):
+    def __init__(self): 
         super().__init__()
         # each token directly reads off the logits for the next token from a lookup table
         self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
         self.position_embedding_table = nn.Embedding(context_len, n_embd)
+        self.sa_head = Head(n_embd)
         self.lm_head = nn.Linear(n_embd, vocab_size)
 
     def forward(self, idx, targets=None):
@@ -77,6 +103,7 @@ class BigramLanguageModel(nn.Module):
         tok_emb = self.token_embedding_table(idx) # (B,T,C)
         pos_emb = self.position_embedding_table(torch.arange(T, device=device)) # (T,C)
         x = tok_emb + pos_emb # (B,T,C)
+        x = self.sa_head(x) # apply one head of self-attention, (B,T,C)
         logits = self.lm_head(tok_emb) # (B,T,vocab_size)
 
         if targets is None:
@@ -91,7 +118,10 @@ class BigramLanguageModel(nn.Module):
     
     def generate(self, idx, max_new_tokens):
         for _ in range(max_new_tokens):
-            logits, _ = self(idx)
+            # crop idx to the context window size.
+            idx_cond = idx[:, :context_len]
+            # get the prediction
+            logits, _ = self(idx_cond)
             # Bigram Language Model only attains to the last token in the context
             logits = logits[:, -1, :]
             # Apply softmax to get probabilities
