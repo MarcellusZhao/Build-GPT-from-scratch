@@ -17,6 +17,7 @@ Under the `scripts` folder, running `bigram.py` and `toy_gpt.py` scripts will in
 cd scripts
 python bigram.py
 python toy_gpt.py
+python gpt.py
 ```
 
 ## Acknowledgements
